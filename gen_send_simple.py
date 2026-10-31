@@ -3,6 +3,8 @@ import socket
 from PyComm.Tcp import ReceiveLines
 import pyvisa  # DRY RUN
 SMB_ETHERNET_ADDRESS = "TCPIP0::192.168.24.10::inst0::INSTR"
+# commands (short form, as sent) whose setting is read back with the same name plus "?"
+READBACK = {"SOUR:LIST:FREQ", "SOUR:LIST:POW", "SOUR:LIST:DWEL", "SOUR:POW:LEV", "SOUR:FREQ", "OUTP:STAT"}
 
 def main():
     host_svr = socket.gethostname()
@@ -14,7 +16,8 @@ def main():
     soc_svr.listen(1)  # N of connections at once
     soc_svr.settimeout(1.0)  # accept() gives up every second, so Ctrl+C is noticed on Windows
 
-    smb = pyvisa.ResourceManager().open_resource(SMB_ETHERNET_ADDRESS, timeout=5000)  # DRY RUN
+    smb = pyvisa.ResourceManager().open_resource(SMB_ETHERNET_ADDRESS, timeout=5000)
+    smb.write("*CLS")  # clear old errors, so the error queue below shows only this message
 
     try:
         while True:
@@ -36,7 +39,13 @@ def main():
                 values = [v.strip() for v in arg.split(",") if v.strip()]
                 print(f"would send: {cmd}  {len(values)} values, {values}")
                 print("line command goes into generator: ", line)
-                #smb.write(line)  # DRY RUN
+                smb.write(line)
+                print("  generator error queue:", smb.query("SYSTem:ERRor?").strip())
+                if cmd.upper() in READBACK: 
+                    try:
+                        print("  generator now holds: ", smb.query(cmd + "?").strip())
+                    except pyvisa.VisaIOError as e:
+                        print("  readback failed:", e)
             soc.close()
     except KeyboardInterrupt:
         print("Stopped.")
