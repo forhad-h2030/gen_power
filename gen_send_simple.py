@@ -29,6 +29,16 @@ def mw_to_dbm(mw):
     return max(10 * math.log10(mw), MIN_DBM) if mw > 0 else MIN_DBM
 
 
+def mw_to_test_profile(powers_mw):
+    """Scaling the mW[] list to 0 to 1 dBm[], for test only. The largest value becomes 1 and zero stays 0."""
+    if any(p < 0 for p in powers_mw):
+        raise ValueError("a power in mW cannot be negative")
+    top = max(powers_mw)
+    if top <= 0:
+        raise ValueError("all powers are zero, nothing to scale")
+    return [p / top for p in powers_mw]
+
+
 def drive(smb, n_points, first_dbm, dwell_s):
     """Play the lists written above once, then leave RF off. The generator refuses list mode while RF is off,
     so RF goes on first. Any error stops the pass, and RF is switched off whatever happens."""
@@ -107,6 +117,8 @@ def main():
                         powers = [float(v) for v in values]
                         if CONVERT_POWER:
                             powers = [mw_to_dbm(p) for p in powers]
+                            # for a test, use this line instead of the one above:
+                            # powers = mw_to_test_profile(powers)
                             line = f"{cmd} " + ",".join(f"{p:.4f}" for p in powers)
                     except ValueError as e:
                         print(f"  power line not sent: {e}")
