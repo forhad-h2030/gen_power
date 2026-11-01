@@ -20,6 +20,16 @@ def mw_to_dbm(mw):
     return max(10 * math.log10(mw), MIN_DBM) if mw > 0 else MIN_DBM
 
 
+def mw_to_test_profile(powers_mw):
+    """Scaling the mW[] list to 0 to 1 dBm[], for test only. The largest value becomes 1 and zero stays 0."""
+    if any(p < 0 for p in powers_mw):
+        raise ValueError("a power in mW cannot be negative")
+    top = max(powers_mw)
+    if top <= 0:
+        raise ValueError("all powers are zero, nothing to scale")
+    return [p / top for p in powers_mw]
+
+
 def drive_cw(smb, freqs_hz, powers_dbm, dwell_s):
     """Play the profile once in CW mode, then leave RF off. Each bin is written at its own start time, counted from one
     start, so the delays do not add up. RF is switched off whatever happens."""
@@ -98,7 +108,11 @@ def main():
                         freqs = [float(v) * 1e6 if CONVERT_FREQ else float(v) for v in values]
 
                     if cmd.upper() == "SOUR:LIST:POW":
-                        powers = [mw_to_dbm(float(v)) if CONVERT_POWER else float(v) for v in values]
+                        powers = [float(v) for v in values]
+                        if CONVERT_POWER:
+                            powers = [mw_to_dbm(p) for p in powers]
+                            # for a test, use this line instead of the one above:
+                            # powers = mw_to_test_profile(powers)
 
                     if cmd.upper() == "SOUR:LIST:DWEL" and values:
                         if len(set(values)) > 1:
