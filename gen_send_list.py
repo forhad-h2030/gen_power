@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Receive a profile from the client and write each line to the generator. The sender gives MHz and mW; the generator
 takes Hz and dBm. Set CONVERT_FREQ and CONVERT_POWER below: True converts that line, False sends it as received.
-The dwell is always the generator's own minimum (asked at startup); the sender's dwell is not used.
+The dwell is always DWELL_S below; the sender's dwell is not used.
 After each write it prints the generator's error queue and what it holds.
 With DRIVE = False nothing is armed or triggered. With DRIVE = True, drive() then plays the list once, waits until the
 generator says the pass is over, switches RF off and prints the times.
@@ -19,6 +19,7 @@ CONVERT_POWER = True  # True: the powers come in mW, send dBm. False: send them 
 MIN_DBM = -120.0  # 0 mW has no dBm value, so it is sent as this
 DRIVE = False  # False: only load the lists. True: after writing them, play one pass (RF on), then RF off
 MAX_DBM = 2.0  # with DRIVE on, no pass starts if any power is above this (dBm). Raise it on purpose only
+DWELL_S = 0.0013  # dwell per bin, s, for every pass. 500 bins completed 5 of 5 times at 1.3 ms, and failed at 1.2 ms
 RUNNING_BIT = 8  # bit of STATus:OPERation:CONDition? that is set while a list pass runs (seen with gen_pass_test.py)
 POLL_S = 0.1  # how often drive() asks the generator whether the pass is still running
 LIST_NAME = "gen_profile"  # the generator list that the lines below are written into
@@ -103,8 +104,7 @@ def main():
         print("power unit query failed: ", e)
     smb.write("*CLS")  # clear old errors, so the error queue below shows only this message
     smb.write(f'SOURce:LIST:SELect "{LIST_NAME}"')  # the lists below go into this list, which drive() plays
-    min_dwell = float(smb.query("SOURce:LIST:DWELl? MIN"))  # the shortest dwell the generator allows
-    print(f"dwell for every pass, the generator's minimum: {min_dwell:g} s")
+    print(f"dwell for every pass: {DWELL_S:g} s")
 
     try:
         while True:
@@ -143,8 +143,8 @@ def main():
                         continue
 
                 if cmd.upper() == "SOUR:LIST:DWEL":
-                    print(f"  note: the sender's dwell is not used, sending the generator's minimum {min_dwell:g} s")
-                    dwell = min_dwell
+                    print(f"  note: the sender's dwell is not used, sending {DWELL_S:g} s")
+                    dwell = DWELL_S
                     line = f"{cmd} {dwell:g}"
 
                 print("line command goes into generator: ", line)
