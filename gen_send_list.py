@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Receive a profile from the client and write each line to the generator. The sender gives MHz and mW; the generator
 takes Hz and dBm. Set CONVERT_FREQ and CONVERT_POWER below: True converts that line, False sends it as received.
-The dwell line is cut to its first value. After each write it prints the generator's error queue and what it holds.
-With DRIVE = False nothing is armed or triggered. With DRIVE = True, drive() then plays the list once and switches RF off.
+The dwell is always the generator's own minimum (asked at startup); the sender's dwell is not used.
+After each write it prints the generator's error queue and what it holds.
+With DRIVE = False nothing is armed or triggered. With DRIVE = True, drive() then plays the list once, waits until the
+generator says the pass is over, switches RF off and prints the times.
     python gen_send_list.py
 """
 import math
@@ -16,11 +18,9 @@ CONVERT_FREQ = True  # True: the frequencies come in MHz, send Hz. False: send t
 CONVERT_POWER = True  # True: the powers come in mW, send dBm. False: send them as received
 MIN_DBM = -120.0  # 0 mW has no dBm value, so it is sent as this
 DRIVE = False  # False: only load the lists. True: after writing them, play one pass (RF on), then RF off
-MAX_DBM = 0.0  # with DRIVE on, no pass starts if any power is above this (dBm). Raise it on purpose only
-USE_MIN_DWELL = False  # True: use the generator's own minimum dwell, in the line sent and in the wait. False: the sender's
+MAX_DBM = 2.0  # with DRIVE on, no pass starts if any power is above this (dBm). Raise it on purpose only
 RUNNING_BIT = 8  # bit of STATus:OPERation:CONDition? that is set while a list pass runs (seen with gen_pass_test.py)
 POLL_S = 0.1  # how often drive() asks the generator whether the pass is still running
-DONE_LIMIT_S = 5.0  # a pass is waited for at most its calculated length plus this, then RF goes off anyway
 LIST_NAME = "gen_profile"  # the generator list that the lines below are written into
 # commands (short form, as sent) whose setting is read back with the same name plus "?"
 READBACK = {"SOUR:LIST:FREQ", "SOUR:LIST:POW", "SOUR:LIST:DWEL", "SOUR:POW:LEV", "SOUR:FREQ", "OUTP:STAT"}
@@ -43,33 +43,16 @@ def mw_to_test_profile(powers_mw):
     return [p / top for p in powers_mw]
 
 
-def mark(smb, t_msg, label):
-    """Print the time since the message arrived, then the generator's RF state and its operation status register."""
-    t = time.monotonic() - t_msg  # taken first, so the two queries below do not shift it
-    try:
-        rf = smb.query("OUTPut:STATe?").strip()
-        operation = smb.query("STATus:OPERation:CONDition?").strip()
-    except pyvisa.VisaIOError as e:
-        rf = operation = f"no answer ({e})"
-    print(f"  t = {t:8.3f} s  {label}: RF {rf}, operation status {operation}")
-    return t
-
-
 def running(smb):
     """True while the generator reports a list pass running (RUNNING_BIT of its operation status)."""
     return int(smb.query("STATus:OPERation:CONDition?")) & RUNNING_BIT != 0
 
 
 def drive(smb, n_points, first_dbm, dwell_s, t_msg):
-    """Play the lists written above once, then leave RF off. The generator refuses list mode while RF is off,
-    so RF goes on first. The pass is over when the generator stops reporting it running. Any error stops the pass,
-    and RF is switched off whatever happens.
-    t_msg is the time the message arrived (time.monotonic()); the times printed are counted from it."""
-    t_trigger = 0.0
+    """Play the lists written above once, then leave RF off. The generator refuses list mode while RF is off, so RF
+    goes on first. The pass is over when the generator stops reporting it running, and its error queue then says if
+    it was cut short. t_msg is the time the message arrived (time.monotonic()). RF is switched off whatever happens."""
     try:
-        for q in ("FREQuency", "POWer"):
-            if int(smb.query(f"SOURce:LIST:{q}:POINts?")) != n_points:
-                raise RuntimeError(f"the generator holds the wrong number of {q} points")
         for command in ("OUTPut:STATe OFF",
                         "SOURce:FREQuency:MODE CW",
                         "SOURce:POWer:MODE CW",
@@ -79,32 +62,25 @@ def drive(smb, n_points, first_dbm, dwell_s, t_msg):
                         "OUTPut:STATe ON",
                         "SOURce:FREQuency:MODE LIST",
                         "SOURce:LIST:TRIGger:EXECute"):  # starts the pass
-            print("  drive >", command)
             smb.write(command)
-            if command.endswith("EXECute"):
-                t_trigger = mark(smb, t_msg, "trigger sent")
-            error = smb.query("SYSTem:ERRor?").strip()
-            if not error.startswith("0"):
-                raise RuntimeError(f"{command!r} rejected: {error}")
-        expected = n_points * dwell_s
-        print(f"driving {n_points} bins for {expected:g} s")
-        deadline = t_msg + t_trigger + expected + DONE_LIMIT_S
+        t_trigger = time.monotonic()
+        print(f"driving {n_points} bins, expected {n_points * dwell_s:g} s")
+
         while running(smb):
-            if time.monotonic() > deadline:
-                raise RuntimeError(f"the generator still reports the pass running {DONE_LIMIT_S:g} s after its end")
             time.sleep(POLL_S)
-        t_end = mark(smb, t_msg, "pass done")  # the generator has stopped reporting the pass running
-        passed = t_end - t_trigger
-        if passed < expected / 2:
-            print("  warning: the running flag was not seen, the pass may not have started")
-        print(f"  message to trigger {t_trigger:.3f} s, trigger to pass done {passed:.3f} s "
-              f"(the bins alone: {expected:.3f} s)")
-        print("pass done, RF off")
-    except (RuntimeError, pyvisa.VisaIOError) as e:
-        print(f"not driven, RF off: {e}")
+        t_done = time.monotonic()
+
+        print(f"pass took {t_done - t_trigger:.3f} s")
+        print(f"message to trigger {t_trigger - t_msg:.3f} s, message to pass done {t_done - t_msg:.3f} s")
+        error = smb.query("SYSTem:ERRor?").strip()
+        print("error queue:", error)
+        if not error.startswith("0"):
+            print("pass NOT complete")
+    except pyvisa.VisaIOError as e:
+        print(f"pass stopped: {e}")
     finally:
         smb.write("OUTPut:STATe OFF")
-        mark(smb, t_msg, "RF off")
+        print("RF off")
 
 
 def main():
@@ -127,10 +103,8 @@ def main():
         print("power unit query failed: ", e)
     smb.write("*CLS")  # clear old errors, so the error queue below shows only this message
     smb.write(f'SOURce:LIST:SELect "{LIST_NAME}"')  # the lists below go into this list, which drive() plays
-    min_dwell = 0.0
-    if USE_MIN_DWELL:
-        min_dwell = float(smb.query("SOURce:LIST:DWELl? MIN"))  # the shortest dwell the generator allows
-        print(f"using the generator's minimum dwell: {min_dwell:g} s")
+    min_dwell = float(smb.query("SOURce:LIST:DWELl? MIN"))  # the shortest dwell the generator allows
+    print(f"dwell for every pass, the generator's minimum: {min_dwell:g} s")
 
     try:
         while True:
@@ -143,7 +117,6 @@ def main():
 
             msg = ReceiveLines(soc)
             t_msg = time.monotonic()  # the times printed by drive() are counted from here
-            print("  t =    0.000 s  message received")
 
             n_points, powers, dwell = 0, [], 0.0  # what drive() needs, taken from the lines below
             for line in msg.splitlines():
@@ -160,29 +133,19 @@ def main():
                     try:
                         powers = [float(v) for v in values]
                         if CONVERT_POWER:
-                            powers = [mw_to_dbm(p) for p in powers]
-                            # for a test, use this line instead of the one above:
-                            # powers = mw_to_test_profile(powers)
+                            powers = mw_to_test_profile(powers)  # test: the list scaled to 0 to 1 dBm
+                            # for real powers, use this line instead of the one above:
+                            # powers = [mw_to_dbm(p) for p in powers]
                             line = f"{cmd} " + ",".join(f"{p:.4f}" for p in powers)
                     except ValueError as e:
                         print(f"  power line not sent: {e}")
                         powers = []  # no pass is driven from a power list that was not sent
                         continue
 
-                if cmd.upper() == "SOUR:LIST:DWEL" and values:
-                    try:
-                        dwell = float(values[0])
-                    except ValueError:
-                        dwell = 0.0  # no pass is driven; the generator will refuse the line itself
-                    if USE_MIN_DWELL:
-                        print(f"  note: the sender gave {values[0]}, using the generator's minimum {min_dwell:g} s")
-                        dwell = min_dwell
-                        line = f"{cmd} {dwell:g}"
-
-                if cmd.upper() == "SOUR:LIST:DWEL" and len(values) > 1 and not USE_MIN_DWELL:
-                    if len(set(values)) > 1:
-                        print("  note: the dwell values differ, only the first is sent")
-                    line = f"{cmd} {values[0]}"
+                if cmd.upper() == "SOUR:LIST:DWEL":
+                    print(f"  note: the sender's dwell is not used, sending the generator's minimum {min_dwell:g} s")
+                    dwell = min_dwell
+                    line = f"{cmd} {dwell:g}"
 
                 print("line command goes into generator: ", line)
                 smb.write(line)
