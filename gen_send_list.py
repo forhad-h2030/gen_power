@@ -19,8 +19,9 @@ CONVERT_FREQ = True  # True: the frequencies come in MHz, send Hz. False: send t
 CONVERT_POWER = True  # True: the powers come in mW, send dBm. False: send them as received
 MIN_DBM = -120.0  # 0 mW has no dBm value, so it is sent as this
 MIN_POWER = 0.01  # a bin whose power value in the profile, as received, is below this is dropped, so the pass is shorter. 0 keeps every bin
-DRIVE = False  # False: only load the lists. True: after writing them, play one pass (RF on), then RF off
-MAX_DBM = 2.0  # with DRIVE on, no pass starts if any power is above this (dBm). Raise it on purpose only
+DRIVE = True  # False: only load the lists. True: after writing them, play one pass (RF on), then RF off
+REPEAT = False  # with DRIVE on, True: the list runs again and again (to watch it on the tinySA), RF stays on until the next message or Ctrl+C
+MAX_DBM = 1.0  # with DRIVE on, no pass starts if any power is above this (dBm). Raise it on purpose only
 DWELL_S = 0.0013  # dwell per bin, s, for every pass. 500 bins completed 5 of 5 times at 1.3 ms, and failed at 1.2 ms
 RUNNING_BIT = 8  # bit of STATus:OPERation:CONDition? that is set while a list pass runs (seen with gen_pass_test.py)
 POLL_S = 0.1  # how often drive() asks the generator whether the pass is still running
@@ -74,20 +75,25 @@ def running(smb):
 def drive(smb, n_points, first_dbm, dwell_s, t_msg):
     """Play the lists written above once, then leave RF off. The generator refuses list mode while RF is off, so RF
     goes on first. The pass is over when the generator stops reporting it running, and its error queue then says if
-    it was cut short. t_msg is the time the message arrived (time.monotonic()). RF is switched off whatever happens."""
+    it was cut short. t_msg is the time the message arrived (time.monotonic()). RF is switched off whatever happens,
+    except with REPEAT, where the list keeps running and RF stays on."""
+    repeating = False
     try:
         for command in ("OUTPut:STATe OFF",
                         "SOURce:FREQuency:MODE CW",
                         "SOURce:POWer:MODE CW",
                         f"SOURce:POWer:LEVel {first_dbm:.4f}",  # RF starts at the first list power
                         "SOURce:LIST:MODE AUTO",
-                        "SOURce:LIST:TRIGger:SOURce SINGle",  # one pass per trigger, no repeat
+                        f"SOURce:LIST:TRIGger:SOURce {'AUTO' if REPEAT else 'SINGle'}",  # AUTO repeats, SINGle is one pass per trigger
                         "OUTPut:STATe ON",
-                        "SOURce:FREQuency:MODE LIST",
-                        "SOURce:LIST:TRIGger:EXECute"):  # starts the pass
+                        "SOURce:FREQuency:MODE LIST") + (() if REPEAT else ("SOURce:LIST:TRIGger:EXECute",)):  # EXECute starts the pass
             smb.write(command)
         t_trigger = time.monotonic()
         print(f"driving {n_points} bins, expected {n_points * dwell_s:g} s")
+        if REPEAT:
+            repeating = True
+            print("repeating the list, RF stays on until the next message or Ctrl+C")
+            return
 
         while running(smb):
             time.sleep(POLL_S)
@@ -102,8 +108,9 @@ def drive(smb, n_points, first_dbm, dwell_s, t_msg):
     except pyvisa.VisaIOError as e:
         print(f"pass stopped: {e}")
     finally:
-        smb.write("OUTPut:STATe OFF")
-        print("RF off")
+        if not repeating:
+            smb.write("OUTPut:STATe OFF")
+            print("RF off")
 
 
 def main():
@@ -199,6 +206,12 @@ def main():
     except KeyboardInterrupt:
         print("Stopped.")
     finally:
+        if DRIVE and REPEAT:  # the list may still be running
+            try:
+                smb.write("OUTPut:STATe OFF")
+                print("RF off")
+            except pyvisa.VisaIOError:
+                pass
         soc_svr.close()
         smb.close()
 

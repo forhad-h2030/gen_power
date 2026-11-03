@@ -24,8 +24,11 @@ QUERIES = [
 
 def plot_profile(freq_text, power_text):
     """Plot the list the generator holds: frequency (MHz) on x, power as the generator holds it (arbitrary units for now) on y."""
-    freqs = [float(v) / 1e6 for v in freq_text.split(",")]
-    powers = [float(v) for v in power_text.split(",")]
+    freqs = [float(v) / 1e6 for v in freq_text.split(",") if v.strip()]  # an empty list or a trailing comma gives ''
+    powers = [float(v) for v in power_text.split(",") if v.strip()]
+    if not freqs or not powers:
+        print(f"not plotted: the generator list is empty ({len(freqs)} frequencies, {len(powers)} powers)")
+        return
     if len(freqs) != len(powers):
         print(f"not plotted: {len(freqs)} frequencies but {len(powers)} powers")
         return
