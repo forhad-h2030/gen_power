@@ -2,6 +2,7 @@
 """Receive a profile from the client and write each line to the generator. The sender gives MHz and mW; the generator
 takes Hz and dBm. Set CONVERT_FREQ and CONVERT_POWER below: True converts that line, False sends it as received.
 The dwell is always DWELL_S below; the sender's dwell is not used.
+Bins with a profile power value below MIN_POWER are dropped (frequency and power together), so the pass is shorter.
 After each write it prints the generator's error queue and what it holds.
 With DRIVE = False nothing is armed or triggered. With DRIVE = True, drive() then plays the list once, waits until the
 generator says the pass is over, switches RF off and prints the times.
@@ -17,6 +18,7 @@ SMB_ETHERNET_ADDRESS = "TCPIP0::192.168.24.10::inst0::INSTR"
 CONVERT_FREQ = True  # True: the frequencies come in MHz, send Hz. False: send them as received
 CONVERT_POWER = True  # True: the powers come in mW, send dBm. False: send them as received
 MIN_DBM = -120.0  # 0 mW has no dBm value, so it is sent as this
+MIN_POWER = 0.01  # a bin whose power value in the profile, as received, is below this is dropped, so the pass is shorter. 0 keeps every bin
 DRIVE = False  # False: only load the lists. True: after writing them, play one pass (RF on), then RF off
 MAX_DBM = 2.0  # with DRIVE on, no pass starts if any power is above this (dBm). Raise it on purpose only
 DWELL_S = 0.0013  # dwell per bin, s, for every pass. 500 bins completed 5 of 5 times at 1.3 ms, and failed at 1.2 ms
@@ -42,6 +44,26 @@ def mw_to_test_profile(powers_mw):
     if top <= 0:
         raise ValueError("all powers are zero, nothing to scale")
     return [p / top for p in powers_mw]
+
+
+def quiet_bins(msg):
+    """For each bin of the message, True if it stays and False if its power is below MIN_POWER. None when nothing is
+    dropped: MIN_POWER is 0, a list is missing, the lists differ in length or a power is not a number."""
+    lists = {}
+    for line in msg.splitlines():
+        cmd, _, arg = line.strip().partition(" ")
+        lists[cmd.upper()] = [v.strip() for v in arg.split(",") if v.strip()]
+    freqs, powers = lists.get("SOUR:LIST:FREQ"), lists.get("SOUR:LIST:POW")
+    if MIN_POWER <= 0 or not freqs or not powers:
+        return None
+    if len(freqs) != len(powers):
+        print(f"  no bins dropped: {len(freqs)} frequencies but {len(powers)} powers")
+        return None
+    try:
+        keep = [float(p) >= MIN_POWER for p in powers]
+    except ValueError:
+        return None  # the power line is reported below, as before
+    return keep if not all(keep) else None
 
 
 def running(smb):
@@ -118,10 +140,22 @@ def main():
             msg = ReceiveLines(soc)
             t_msg = time.monotonic()  # the times printed by drive() are counted from here
 
+            keep = quiet_bins(msg)  # which bins stay (True), or None when nothing is dropped
+            if keep is not None:
+                print(f"bins kept: {sum(keep)} of {len(keep)} (power below {MIN_POWER:g} dropped)")
+                if not any(keep):
+                    print("not sent: every bin is below MIN_POWER")
+                    soc.close()
+                    continue
+
             n_points, powers, dwell = 0, [], 0.0  # what drive() needs, taken from the lines below
             for line in msg.splitlines():
                 cmd, _, arg = line.strip().partition(" ")
                 values = [v.strip() for v in arg.split(",") if v.strip()]
+
+                if keep is not None and cmd.upper() in ("SOUR:LIST:FREQ", "SOUR:LIST:POW"):
+                    values = [v for v, k in zip(values, keep) if k]
+                    line = f"{cmd} " + ",".join(values)
 
                 if cmd.upper() == "SOUR:LIST:FREQ":
                     n_points = len(values)
