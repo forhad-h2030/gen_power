@@ -20,6 +20,7 @@ SMB_ETHERNET_ADDRESS = "TCPIP0::192.168.24.10::inst0::INSTR"
 CONVERT_FREQ = True  # True: the frequencies come in MHz, send Hz. False: send them as received
 CONVERT_POWER = True  # True: the powers come in mW, send dBm. False: send them as received
 MIN_DBM = -120.0  # 0 mW has no dBm value, so it is sent as this
+PEAK_DBM = 0.0  # the largest power of the profile goes out at this level (dBm), every other bin below it by its ratio
 MIN_POWER = 0.01  # a bin whose power value in the profile, as received, is below this is dropped, so the pass is shorter. 0 keeps every bin
 DRIVE = True  # False: only load the lists. True: after writing them, play one pass (RF on), then RF off
 REPEAT = False  # with DRIVE on, True: the list runs again and again (to watch it on the tinySA), RF stays on until the next message or Ctrl+C
@@ -38,6 +39,17 @@ def mw_to_dbm(mw):
     if mw < 0:
         raise ValueError(f"{mw} is not a power in mW")
     return max(10 * math.log10(mw), MIN_DBM) if mw > 0 else MIN_DBM
+
+
+def mw_to_relative_dbm(powers_mw):
+    """The largest power goes out at PEAK_DBM and every other by its ratio to it, so the output power has the shape of
+    the profile in mW (a bin at 7% of the peak is 11.5 dB below it). 0 mW becomes MIN_DBM."""
+    if any(p < 0 for p in powers_mw):
+        raise ValueError("a power in mW cannot be negative")
+    top = max(powers_mw)
+    if top <= 0:
+        raise ValueError("all powers are zero, nothing to scale")
+    return [max(PEAK_DBM + 10 * math.log10(p / top), MIN_DBM) if p > 0 else MIN_DBM for p in powers_mw]
 
 
 def mw_to_test_profile(powers_mw):
@@ -62,7 +74,8 @@ def message_lists(msg):
 def save_profile(msg, keep):
     """Write every bin of the message to PROFILE_FILE, before any bin is dropped, so gen_readback.py can show the whole
     profile next to what the generator holds. Columns: frequency (MHz), power as received, power divided by the
-    largest power (0 to 1, as the test profile sends it), and whether the bin was sent."""
+    largest power (0 to 1), the level in dBm the bin gets (as sent, for a dropped bin as it would have been), and
+    whether the bin was sent."""
     lists = message_lists(msg)
     freqs, powers = lists.get("SOUR:LIST:FREQ"), lists.get("SOUR:LIST:POW")
     try:
@@ -71,11 +84,12 @@ def save_profile(msg, keep):
         f_mhz = [float(f) if CONVERT_FREQ else float(f) / 1e6 for f in freqs]
         p = [float(v) for v in powers]
         top = max(p) or 1.0
+        dbm = mw_to_relative_dbm(p) if CONVERT_POWER else p
         with open(PROFILE_FILE, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["freq_mhz", "power_received", "power_normalized", "sent"])
-            for i, (fm, pw) in enumerate(zip(f_mhz, p)):
-                writer.writerow([f"{fm:.6f}", f"{pw:.6g}", f"{pw / top:.6g}", int(keep is None or keep[i])])
+            writer.writerow(["freq_mhz", "power_received", "power_normalized", "power_dbm", "sent"])
+            for i, (fm, pw, d) in enumerate(zip(f_mhz, p, dbm)):
+                writer.writerow([f"{fm:.6f}", f"{pw:.6g}", f"{pw / top:.6g}", f"{d:.4f}", int(keep is None or keep[i])])
     except (OSError, ValueError) as e:
         print(f"  full profile not saved: {e}")
 
@@ -205,9 +219,11 @@ def main():
                     try:
                         powers = [float(v) for v in values]
                         if CONVERT_POWER:
-                            powers = mw_to_test_profile(powers)  # test: the list scaled to 0 to 1 dBm
+                            powers = mw_to_relative_dbm(powers)  # the peak goes out at PEAK_DBM, the others by their ratio
                             # for real powers, use this line instead of the one above:
                             # powers = [mw_to_dbm(p) for p in powers]
+                            # for the old test (the list scaled to 0 to 1 dBm):
+                            # powers = mw_to_test_profile(powers)
                             line = f"{cmd} " + ",".join(f"{p:.4f}" for p in powers)
                     except ValueError as e:
                         print(f"  power line not sent: {e}")

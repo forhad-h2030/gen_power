@@ -26,11 +26,11 @@ QUERIES = [
 ]
 
 def load_full_profile():
-    """The last profile gen_send_list.py received, every bin: (freq_mhz[], power_normalized[]), or None if unavailable."""
+    """The last profile gen_send_list.py received, every bin: (freq_mhz[], power_dbm[]), or None if unavailable."""
     try:
         with open(PROFILE_FILE, newline="") as f:
             rows = list(csv.DictReader(f))
-        return [float(r["freq_mhz"]) for r in rows], [float(r["power_normalized"]) for r in rows]
+        return [float(r["freq_mhz"]) for r in rows], [float(r["power_dbm"]) for r in rows]
     except (OSError, KeyError, ValueError):
         return None
 
@@ -49,16 +49,18 @@ def plot_profile(freq_text, power_text):
     fig, ax = plt.subplots()
     full = load_full_profile()
     if full:
+        floor = min(powers) - 10  # a bin at 0 mW is -120 dBm, which is left below the axis
         ax.step(full[0], full[1], where="post", color="#1e7f55", label=f"whole profile ({len(full[0])} bins)")
-        ax.fill_between(full[0], full[1], 0, step="post", color="#1e7f55", alpha=0.25)
+        ax.fill_between(full[0], full[1], floor, step="post", color="#1e7f55", alpha=0.25)
         ax.plot(freqs, powers, "o", color="#b8312f", markersize=3, label=f"held by the generator ({len(freqs)} bins)")
+        ax.set_ylim(bottom=floor)
         ax.legend()
     else:
         ax.step(freqs, powers, where="post", color="#1e7f55")
         ax.fill_between(freqs, powers, min(powers), step="post", color="#1e7f55", alpha=0.25)
         print(f"whole profile not drawn: {PROFILE_FILE.name} not found (it is written when gen_send_list.py gets a message)")
     ax.set_xlabel("Frequency (MHz)")
-    ax.set_ylabel("Power (arb. units)")
+    ax.set_ylabel("Power (dBm)")
     ax.grid(alpha=0.3)
     plt.show()
 
