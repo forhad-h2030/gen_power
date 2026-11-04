@@ -62,7 +62,31 @@ def plot_profile(freq_text, power_text):
     ax.set_xlabel("Frequency (MHz)")
     ax.set_ylabel("Power (dBm)")
     ax.grid(alpha=0.3)
-    plt.show()
+
+
+def plot_raw_profile():
+    """Plot the profile as gen_send_list.py received it, before any scaling: power as received (mW) against frequency.
+    The bins that were not sent to the generator (cut by MIN_DB) are marked with a grey cross."""
+    try:
+        with open(PROFILE_FILE, newline="") as f:
+            rows = list(csv.DictReader(f))
+        freqs = [float(r["freq_mhz"]) for r in rows]
+        powers = [float(r["power_received"]) for r in rows]
+        sent = [r["sent"] == "1" for r in rows]
+    except (OSError, KeyError, ValueError):
+        print(f"raw profile not drawn: {PROFILE_FILE.name} not found or unreadable "
+              "(it is written when gen_send_list.py gets a message)")
+        return
+    fig, ax = plt.subplots()
+    ax.step(freqs, powers, where="post", color="#1e7f55", label=f"profile as received ({len(freqs)} bins)")
+    ax.fill_between(freqs, powers, 0, step="post", color="#1e7f55", alpha=0.25)
+    dropped = [(f, p) for f, p, s in zip(freqs, powers, sent) if not s]
+    if dropped:
+        ax.plot(*zip(*dropped), "x", color="#7a7a7a", markersize=4, label=f"not sent ({len(dropped)} bins)")
+    ax.set_xlabel("Frequency (MHz)")
+    ax.set_ylabel("Power as received (mW)")
+    ax.grid(alpha=0.3)
+    ax.legend()
 
 
 def main():
@@ -81,10 +105,13 @@ def main():
 
     if plt is None:
         print("not plotted: matplotlib is not installed (pip install matplotlib)")
-    elif "SOURce:LIST:FREQuency?" in answers and "SOURce:LIST:POWer?" in answers:
-        plot_profile(answers["SOURce:LIST:FREQuency?"], answers["SOURce:LIST:POWer?"])
     else:
-        print("not plotted: the generator did not answer the frequency or power list")
+        if "SOURce:LIST:FREQuency?" in answers and "SOURce:LIST:POWer?" in answers:
+            plot_profile(answers["SOURce:LIST:FREQuency?"], answers["SOURce:LIST:POWer?"])
+        else:
+            print("not plotted: the generator did not answer the frequency or power list")
+        plot_raw_profile()
+        plt.show()
 
 if __name__ == "__main__":
     main()

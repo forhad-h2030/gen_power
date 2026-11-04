@@ -2,7 +2,7 @@
 """Receive a profile from the client and write each line to the generator. The sender gives MHz and mW; the generator
 takes Hz and dBm. Set CONVERT_FREQ and CONVERT_POWER below: True converts that line, False sends it as received.
 The dwell is always DWELL_S below; the sender's dwell is not used.
-Bins with a profile power value below MIN_POWER are dropped (frequency and power together), so the pass is shorter.
+Bins more than MIN_DB below the largest power of the profile are dropped (frequency and power together), so the pass is shorter.
 After each write it prints the generator's error queue and what it holds.
 With DRIVE = False nothing is armed or triggered. With DRIVE = True, drive() then plays the list once, waits until the
 generator says the pass is over, switches RF off and prints the times.
@@ -21,7 +21,7 @@ CONVERT_FREQ = True  # True: the frequencies come in MHz, send Hz. False: send t
 CONVERT_POWER = True  # True: the powers come in mW, send dBm. False: send them as received
 MIN_DBM = -120.0  # 0 mW has no dBm value, so it is sent as this
 PEAK_DBM = 0.0  # the largest power of the profile goes out at this level (dBm), every other bin below it by its ratio
-MIN_POWER = 0.01  # a bin whose power value in the profile, as received, is below this is dropped, so the pass is shorter. 0 keeps every bin
+MIN_DB = -17.0  # a bin more than this many dB below the largest power of the profile is dropped, so the pass is shorter. None keeps every bin
 DRIVE = True  # False: only load the lists. True: after writing them, play one pass (RF on), then RF off
 REPEAT = False  # with DRIVE on, True: the list runs again and again (to watch it on the tinySA), RF stays on until the next message or Ctrl+C
 MAX_DBM = 1.0  # with DRIVE on, no pass starts if any power is above this (dBm). Raise it on purpose only
@@ -95,17 +95,19 @@ def save_profile(msg, keep):
 
 
 def quiet_bins(msg):
-    """For each bin of the message, True if it stays and False if its power is below MIN_POWER. None when nothing is
-    dropped: MIN_POWER is 0, a list is missing, the lists differ in length or a power is not a number."""
+    """For each bin of the message, True if it stays and False if its power is more than MIN_DB below the largest power.
+    None when nothing is dropped: MIN_DB is None, a list is missing, the lists differ in length or a power is not a number."""
     lists = message_lists(msg)
     freqs, powers = lists.get("SOUR:LIST:FREQ"), lists.get("SOUR:LIST:POW")
-    if MIN_POWER <= 0 or not freqs or not powers:
+    if MIN_DB is None or not freqs or not powers:
         return None
     if len(freqs) != len(powers):
         print(f"  no bins dropped: {len(freqs)} frequencies but {len(powers)} powers")
         return None
     try:
-        keep = [float(p) >= MIN_POWER for p in powers]
+        values = [float(p) for p in powers]
+        cut = max(values) * 10 ** (MIN_DB / 10)  # the power MIN_DB below the largest one
+        keep = [p >= cut and p > 0 for p in values]  # a bin at 0 is never kept
     except ValueError:
         return None  # the power line is reported below, as before
     return keep if not all(keep) else None
@@ -194,9 +196,9 @@ def main():
             keep = quiet_bins(msg)  # which bins stay (True), or None when nothing is dropped
             save_profile(msg, keep)
             if keep is not None:
-                print(f"bins kept: {sum(keep)} of {len(keep)} (power below {MIN_POWER:g} dropped)")
+                print(f"bins kept: {sum(keep)} of {len(keep)} (more than {abs(MIN_DB):g} dB below the peak dropped)")
                 if not any(keep):
-                    print("not sent: every bin is below MIN_POWER")
+                    print("not sent: no bin is left after the MIN_DB cut")
                     soc.close()
                     continue
 
