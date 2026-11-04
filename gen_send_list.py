@@ -8,9 +8,11 @@ With DRIVE = False nothing is armed or triggered. With DRIVE = True, drive() the
 generator says the pass is over, switches RF off and prints the times.
     python gen_send_list.py
 """
+import csv
 import math
 import socket
 import time
+from pathlib import Path
 import pyvisa
 from PyComm.Tcp import ReceiveLines
 
@@ -26,6 +28,7 @@ DWELL_S = 0.0013  # dwell per bin, s, for every pass. 500 bins completed 5 of 5 
 RUNNING_BIT = 8  # bit of STATus:OPERation:CONDition? that is set while a list pass runs (seen with gen_pass_test.py)
 POLL_S = 0.1  # how often drive() asks the generator whether the pass is still running
 LIST_NAME = "gen_profile"  # the generator list that the lines below are written into
+PROFILE_FILE = Path(__file__).resolve().parent / "last_profile.csv"  # every bin of the last message, for gen_readback.py
 # commands (short form, as sent) whose setting is read back with the same name plus "?"
 READBACK = {"SOUR:LIST:FREQ", "SOUR:LIST:POW", "SOUR:LIST:DWEL", "SOUR:POW:LEV", "SOUR:FREQ", "OUTP:STAT"}
 
@@ -47,13 +50,40 @@ def mw_to_test_profile(powers_mw):
     return [p / top for p in powers_mw]
 
 
-def quiet_bins(msg):
-    """For each bin of the message, True if it stays and False if its power is below MIN_POWER. None when nothing is
-    dropped: MIN_POWER is 0, a list is missing, the lists differ in length or a power is not a number."""
+def message_lists(msg):
+    """The values of each line of the message, by command name (upper case)."""
     lists = {}
     for line in msg.splitlines():
         cmd, _, arg = line.strip().partition(" ")
         lists[cmd.upper()] = [v.strip() for v in arg.split(",") if v.strip()]
+    return lists
+
+
+def save_profile(msg, keep):
+    """Write every bin of the message to PROFILE_FILE, before any bin is dropped, so gen_readback.py can show the whole
+    profile next to what the generator holds. Columns: frequency (MHz), power as received, power divided by the
+    largest power (0 to 1, as the test profile sends it), and whether the bin was sent."""
+    lists = message_lists(msg)
+    freqs, powers = lists.get("SOUR:LIST:FREQ"), lists.get("SOUR:LIST:POW")
+    try:
+        if not freqs or len(freqs) != len(powers or []):
+            raise ValueError("no matching frequency and power lists")
+        f_mhz = [float(f) if CONVERT_FREQ else float(f) / 1e6 for f in freqs]
+        p = [float(v) for v in powers]
+        top = max(p) or 1.0
+        with open(PROFILE_FILE, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["freq_mhz", "power_received", "power_normalized", "sent"])
+            for i, (fm, pw) in enumerate(zip(f_mhz, p)):
+                writer.writerow([f"{fm:.6f}", f"{pw:.6g}", f"{pw / top:.6g}", int(keep is None or keep[i])])
+    except (OSError, ValueError) as e:
+        print(f"  full profile not saved: {e}")
+
+
+def quiet_bins(msg):
+    """For each bin of the message, True if it stays and False if its power is below MIN_POWER. None when nothing is
+    dropped: MIN_POWER is 0, a list is missing, the lists differ in length or a power is not a number."""
+    lists = message_lists(msg)
     freqs, powers = lists.get("SOUR:LIST:FREQ"), lists.get("SOUR:LIST:POW")
     if MIN_POWER <= 0 or not freqs or not powers:
         return None
@@ -148,6 +178,7 @@ def main():
             t_msg = time.monotonic()  # the times printed by drive() are counted from here
 
             keep = quiet_bins(msg)  # which bins stay (True), or None when nothing is dropped
+            save_profile(msg, keep)
             if keep is not None:
                 print(f"bins kept: {sum(keep)} of {len(keep)} (power below {MIN_POWER:g} dropped)")
                 if not any(keep):
