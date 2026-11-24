@@ -14,7 +14,7 @@ import socket
 import time
 from pathlib import Path
 import pyvisa
-from PyComm.Tcp import ReceiveLines
+from PyComm.Tcp import ReceiveLines, SendLines
 
 SMB_ETHERNET_ADDRESS = "TCPIP0::192.168.24.10::inst0::INSTR"
 CONVERT_FREQ = True  # True: the frequencies come in MHz, send Hz. False: send them as received
@@ -118,6 +118,16 @@ def running(smb):
     return int(smb.query("STATus:OPERation:CONDition?")) & RUNNING_BIT != 0
 
 
+def reply(soc, text):
+    """Send one answer line plus EOT to the client. The client may already be gone, so a failed send is printed,
+    not raised."""
+    try:
+        SendLines(soc, [text])
+        print("answer sent:", text)
+    except OSError as e:
+        print(f"answer not sent ({e}): {text}")
+
+
 def drive(smb, n_points, first_dbm, dwell_s, t_msg):
     """Play the lists written above once, then leave RF off. The generator refuses list mode while RF is off, so RF
     goes on first. The pass is over when the generator stops reporting it running, and its error queue then says if
@@ -187,11 +197,11 @@ def main():
                 soc, addr = soc_svr.accept()
             except socket.timeout:
                 continue
-            print("------------------------------------------------------------")
-            print("---- Message ----")
-
+            #print("---- Message ----")
             msg = ReceiveLines(soc)
+            #print("received lines:", [line[:25] for line in msg.splitlines()])
             t_msg = time.monotonic()  # the times printed by drive() are counted from here
+            finished_asked = any(line.strip().upper() == "FINISHED?" for line in msg.splitlines())  # the client waits for "FINISHED"
 
             keep = quiet_bins(msg)  # which bins stay (True), or None when nothing is dropped
             save_profile(msg, keep)
@@ -199,12 +209,16 @@ def main():
                 print(f"bins kept: {sum(keep)} of {len(keep)} (more than {abs(MIN_DB):g} dB below the peak dropped)")
                 if not any(keep):
                     print("not sent: no bin is left after the MIN_DB cut")
+                    if finished_asked:
+                        reply(soc, "FINISHED")
                     soc.close()
                     continue
 
             n_points, powers, dwell = 0, [], 0.0  # what drive() needs, taken from the lines below
             for line in msg.splitlines():
                 cmd, _, arg = line.strip().partition(" ")
+                if cmd.upper() == "FINISHED?":
+                    continue  # a question for this program, not a generator command: answered after the pass
                 values = [v.strip() for v in arg.split(",") if v.strip()]
 
                 if keep is not None and cmd.upper() in ("SOUR:LIST:FREQ", "SOUR:LIST:POW"):
@@ -245,13 +259,15 @@ def main():
                         print("  generator now holds: ", smb.query(cmd + "?").strip())
                     except pyvisa.VisaIOError as e:
                         print("  readback failed:", e)
-            soc.close()  # the pass below can take minutes
 
             if DRIVE and n_points and powers and dwell:
                 if max(powers) > MAX_DBM:
                     print(f"not driven: {max(powers):.2f} dBm is above MAX_DBM {MAX_DBM:g} dBm")
                 else:
-                    drive(smb, n_points, powers[0], dwell, t_msg)
+                    drive(smb, n_points, powers[0], dwell, t_msg)  # returns once the pass is over and RF is off
+            if finished_asked:
+                reply(soc, "FINISHED")
+            soc.close()
     except KeyboardInterrupt:
         print("Stopped.")
     finally:
